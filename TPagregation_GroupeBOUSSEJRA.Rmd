@@ -1,0 +1,214 @@
+---
+title: "TP n°3"
+author: "Boussejra Amir & Wenjing Ye"
+date: "13 January 2022"
+output:
+  html_document: default
+---
+# Names
+
+```{r}
+#1 Boussejra Amir
+#2 Wenjing Ye
+```
+# Problematics
+
+```{r}
+getwd()
+library(readr)
+library(ggplot2)
+myData <- read_csv("data/openpowerlifting-2022-01-12-c36b32bf.csv")
+# Les données de base sont de 2598397 observation sur 41 variables avec proche de 500mb.
+# Avec mon expertise, je vais filter Une partie des données.
+
+```
+## Data Selection
+```{r}
+FilteredData <- dplyr::filter(myData, Sex == "M" & Equipment == "Raw" & Event == "SBD")
+SelectedData <- FilteredData[, c( "Age", "BodyweightKg", "Best3SquatKg","Best3BenchKg","Best3DeadliftKg")]
+SelectedData
+```
+Afficher un récapitulatif des variables
+
+```{r data summary}
+summary(SelectedData)
+```
+```{r data rows selection}
+SelectedData <- dplyr::filter(SelectedData, Age > 18 & BodyweightKg > 50 & Best3SquatKg > 100 & Best3BenchKg > 80 & Best3DeadliftKg > 130)
+
+BadRow <- is.na(SelectedData$Age) | is.na(SelectedData$BodyweightKg) |is.na(SelectedData$Best3SquatKg) | is.na(SelectedData$Best3BenchKg) | is.na(SelectedData$Best3DeadliftKg)
+
+SelectedData <- SelectedData[!BadRow,]
+
+SelectedData
+
+X <- dplyr::select(SelectedData, Age, BodyweightKg, Best3SquatKg, Best3BenchKg )
+
+```
+## Basic Analysis
+
+I decided to work on a subset of the whole dataset, to make sure everything works before going deeper into constructing the models.
+
+```{r}
+set.seed(0)
+ChosenIndexes <- sample(nrow(SelectedData), size=1000, replace=FALSE)
+mySample <- SelectedData[ChosenIndexes,] 
+summary(mySample)
+pairs(mySample)
+```
+
+```{r}
+round(cor(mySample),2)
+```
+
+# Sub models
+
+## Linear regressions
+
+```{r}
+# Without cross effect linear relationship
+myFormula = Best3DeadliftKg ~ 1 + Age + BodyweightKg + Best3SquatKg + Best3BenchKg
+
+myModel <- lm(myFormula, data=SelectedData)
+
+summary(myModel)
+```
+```{r}
+myPrediction <- function(dataset, newdata) {
+myModel <- lm(myFormula, data=dataset)
+myPrediction <- predict(object = myModel, newdata = newdata, se.fit=TRUE, interval = "prediction")
+y = myPrediction$fit[,"fit"]
+ymin = myPrediction$fit[,"lwr"]
+ymax = myPrediction$fit[,"upr"]
+sigma_prediction = (ymax-ymin)/(2*1.96)
+var_prediction = sigma_prediction^2
+result <- data.frame(m= y, vm=var_prediction, x=newdata$BodyweightKg, y=y, ymin=ymin, ymax=ymax)
+return(result)
+}
+# Training on whole dataset, looking at Y = Deadlift, X = Bodyweight 
+XSubsetIndexes <- sample(nrow(X), size=1000, replace=FALSE)
+#XTestIndexes <- Sample(nrow(X), size=1000, replace=FALSE)
+XSubset <- X[XSubsetIndexes,] 
+YSubset <-SelectedData[XSubsetIndexes,5] 
+#DataSubset <- SelectedData[XSubsetIndexes,]
+pred <- myPrediction(SelectedData, XSubset)
+ggplot(pred, aes(x,y)) +
+   scale_x_continuous(limits = range(XSubset$BodyweightKg)) +
+   geom_point(data= pred, aes(x,y), colour="blue", size=1) +
+   geom_ribbon(data= pred, aes(x=x, ymin=m-1.96*sqrt(vm), ymax=ymax),  alpha=0.3, fill="blue") + ggtitle("Un modèle") + xlab("BodyweightKg") + ylab("DeadliftKg to aim")
+
+```
+```{r}
+RMSE = function(fitted, true){
+  sqrt(mean((fitted - true)^2))
+}
+fitted = pred$m
+true = YSubset$Best3DeadliftKg
+RMSE(fitted,true)
+```
+# Model Agregation
+
+
+## Clustering des données
+We will choose to separate the data into $p$ samples. To do this, we will cluster the observed explanatory factors into $p$ groups using the *kmeans* procedure.We construct Local models, on subsets of the data, and then aggregating them. 
+
+```{r clustering}
+#There are 9 main weight categories, which is the most important factor from experience. 9 Clusters seems to be a good idea. If one would like to take more time, he could consider this parameter as a factor of optimization if clustering according to input data
+
+p = 9
+gc()
+clustering <- kmeans(x=X, centers=p, iter.max=20)
+
+clusters <- clustering$cluster
+
+
+```
+
+## Calculation of predictions for each sub-model
+
+
+```{r submodels prediction}
+subModels = list()
+
+for(i in seq(1,p)) {
+  # Doing a subModel for each cluster. And predicting on the whole subset.
+  dataForModeli = SelectedData[clusters==i,]
+  subModels[[i]] = myPrediction(dataset= dataForModeli, XSubset)
+
+}
+
+
+```
+
+## Submodels Agredation
+
+```{r submodels agregation}
+precision = 0
+weightedMean = 0
+for(i in seq(1,p)) {
+  precision = precision + 1/subModels[[i]]$vm
+  weightedMean = weightedMean + subModels[[i]]$m / subModels[[i]]$vm
+}
+
+vpoe = 1/precision
+mpoe = vpoe*weightedMean
+
+resultPoe = data.frame(m=mpoe, vm=vpoe)
+
+```
+
+```{r}
+result = resultPoe
+
+library(ggplot2)
+
+    ymin <- result$m - 1.96*sqrt(result$vm)
+    ymax <- result$m + 1.96*sqrt(result$vm)
+    dfPredic <- data.frame(x=XSubset$BodyweightKg, y=result$m, ymin=ymin, ymax= ymax)
+
+myplot <- ggplot(dfPredic, aes(x,y)) +
+  scale_x_continuous(limits = range(XSubset$BodyweightKg)) +
+  geom_line(data= dfPredic, aes(x,y), colour="blue", size=1, linetype = "solid") +
+  geom_ribbon(data= dfPredic, aes(x=x, ymin=ymin, ymax=ymax), alpha=0.3, fill="blue")
+
+myplot 
+```
+
+## Models Comparison :
+
+```{r}
+fitted = result$m
+true = YSubset$Best3DeadliftKg
+RMSE(fitted,true)
+```
+
+RMSE is not better whith agregation :
+
+## Ideas for explanation 
+
+```{r}
+
+dataForModelone = SelectedData[clusters==1,]
+bestModelData1 = myPrediction(dataset= dataForModelone, dataForModelone)
+generalPred <- myPrediction(dataset = SelectedData, dataForModelone)
+
+fittedModelone = bestModelData1$m
+true = dataForModelone$Best3DeadliftKg
+RMSE(fittedModelone,true)
+
+fittedGeneral <- generalPred$m
+RMSE(fittedGeneral,true)
+
+```
+Hopefully, the particular model is best at predicting data from its cluster than the General. 
+We may think the aggregated model does not yield better result because we do not modulate the importance of each submodel
+
+## Ideas for following things
+
+More analytics on the beginning ( I will do add later)
+Try to Explain why agregation is worst
+Try another agregation technique ?
+Try random sampling data before agregating
+Add wheigths to PoE to get gPoE (Maybe is that because we should not give equal importance to each model)
+
+Optimize those wheights ?
